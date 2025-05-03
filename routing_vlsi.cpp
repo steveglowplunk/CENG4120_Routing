@@ -45,10 +45,25 @@ std::vector<int> aStar(int start, int goal, const Graph &graph,
     costSoFar[start] = 0;
 
     bool found = false;
+
+    int iterations = 0;
+
     while (!frontier.empty())
     {
+        iterations++;
+        if (iterations % 10000 == 0)
+        {
+            std::cout << "[A*] Iteration: " << iterations
+                      << ", frontier size: " << frontier.size() << std::endl;
+        }
+
         int current = frontier.top();
         frontier.pop();
+
+        if (iterations % 50000 == 0)
+        {
+            std::cout << "[A*] Expanding node: " << current << std::endl;
+        }
 
         if (current == goal)
         {
@@ -140,6 +155,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Check if netlist file can be opened before parsing nodes.
+    std::ifstream netTest(argv[2]);
+    if (!netTest.is_open())
+    {
+        std::cerr << "Error opening netlist file: " << argv[2] << std::endl;
+        return 1;
+    }
+    netTest.close();
+
     // Load routing resource graph from the device file.
     std::ifstream infile(argv[1]);
     if (!infile.is_open())
@@ -217,14 +241,11 @@ int main(int argc, char *argv[])
     std::cout << "Parsed " << graph.nodes.size() << " nodes." << std::endl;
 
     // Read remaining lines representing the adjacency list into memory.
-    std::vector<std::string> adjLines;
+    // Since the number of adjacency lines equals num_nodes, preallocate accordingly.
+    std::vector<std::string> adjLines(num_nodes);
+    for (int i = 0; i < num_nodes; ++i)
     {
-        std::string line;
-        while (std::getline(infile, line))
-        {
-            if (!line.empty())
-                adjLines.push_back(line);
-        }
+        std::getline(infile, adjLines[i]);
     }
     size_t nAdj = adjLines.size();
     std::cout << "Found " << nAdj << " adjacency lines." << std::endl;
@@ -350,13 +371,21 @@ int main(int argc, char *argv[])
             // If source equals sink skip routing.
             if (net.source == sink)
                 continue;
+
+            std::cout << "[Routing] Starting route for net " << net.id << " (" << net.name
+                      << ") from " << net.source << " to " << sink << std::endl;
             // Run A* search; the usedNodes set restricts the search to unoccupied nodes.
             std::vector<int> path = aStar(net.source, sink, graph, nodeMap, usedNodes);
             if (path.empty())
             {
-                std::cerr << "Failed to find path for net " << net.id << " (" << net.name
-                          << ") from " << net.source << " to " << sink << std::endl;
+                std::cerr << "[Routing ERROR] Failed to find path for net " << net.id
+                          << " (" << net.name << ") from " << net.source << " to " << sink << std::endl;
                 continue;
+            }
+            else
+            {
+                std::cout << "[Routing] Found path for net " << net.id << " (" << net.name
+                          << "), path length: " << path.size() << std::endl;
             }
             // Convert the path into a list of edges (parent, child) and update usedNodes.
             for (size_t i = 0; i < path.size() - 1; ++i)
@@ -365,8 +394,12 @@ int main(int argc, char *argv[])
                 usedNodes.insert(path[i]);
                 usedNodes.insert(path[i + 1]);
             }
-            std::cout << "Routed net " << net.id << " (" << net.name
-                      << ") from " << net.source << " to " << sink << std::endl;
+            std::cout << "[Routing] Routed net " << net.id << " (" << net.name
+                      << ") from " << net.source << " to " << sink
+                      << ". First nodes in path: ";
+            for (size_t i = 0; i < std::min(path.size(), size_t(5)); ++i)
+                std::cout << path[i] << " ";
+            std::cout << std::endl;
         }
     }
 
