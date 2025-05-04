@@ -29,7 +29,7 @@ int heuristic(int nodeId, int goalId, const std::unordered_map<int, Node *> &nod
 // A* search from start to goal on the given graph.
 // 'used' contains nodes that are already occupied by previous nets.
 std::vector<int> aStar(int start, int goal,
-                       const std::unordered_map<int, std::vector<int>> &adjacency,
+                       const std::vector<std::vector<int>> &adjacency,
                        const std::unordered_map<int, Node *> &nodeMap,
                        const std::unordered_set<int> &used)
 {
@@ -73,22 +73,18 @@ std::vector<int> aStar(int start, int goal,
         }
 
         // Iterate neighbors from the adjacency list; if neighbor is used, skip it.
-        auto it = adjacency.find(current);
-        if (it != adjacency.end())
+        for (int next : adjacency[current])
         {
-            for (int next : it->second)
+            if (used.find(next) != used.end())
             {
-                if (used.find(next) != used.end())
-                {
-                    continue;
-                }
-                int newCost = costSoFar[current] + 1; // all edges have cost 1
-                if (costSoFar.find(next) == costSoFar.end() || newCost < costSoFar[next])
-                {
-                    costSoFar[next] = newCost;
-                    cameFrom[next] = current;
-                    frontier.push(next);
-                }
+                continue;
+            }
+            int newCost = costSoFar[current] + 1; // all edges have cost 1
+            if (costSoFar.find(next) == costSoFar.end() || newCost < costSoFar[next])
+            {
+                costSoFar[next] = newCost;
+                cameFrom[next] = current;
+                frontier.push(next);
             }
         }
     }
@@ -246,10 +242,9 @@ int main(int argc, char *argv[])
     std::cout << "Found " << nAdj << " adjacency lines." << std::endl;
 
     // Preallocate vector to hold parsed adjacency info.
-    std::unordered_map<int, std::vector<int>> adjacency;
+    std::vector<std::vector<int>> adjacency(num_nodes);
     std::vector<std::thread> adjThreads;
     std::atomic<size_t> processedAdj{0};
-    std::mutex adjMapMutex; // Mutex for thread-safe access to adjacency map
 
     auto adjWorker = [&](size_t start, size_t end)
     {
@@ -258,15 +253,10 @@ int main(int argc, char *argv[])
             std::istringstream iss(adjLines[i]);
             int parent;
             iss >> parent;
-            std::vector<int> children;
             int child;
             while (iss >> child)
             {
-                children.push_back(child);
-            }
-            {
-                std::lock_guard<std::mutex> lock(adjMapMutex); // Protect shared adjacency map
-                adjacency[parent] = std::move(children);
+                adjacency[parent].push_back(child);
             }
             ++processedAdj;
         }
