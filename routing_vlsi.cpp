@@ -29,7 +29,7 @@ int heuristic(int nodeId, int goalId, const std::unordered_map<int, Node *> &nod
 // A* search from start to goal on the given graph.
 // 'used' contains nodes that are already occupied by previous nets.
 std::vector<int> aStar(int start, int goal,
-                       const std::vector<std::vector<int>> &adjacency,
+                       const std::unordered_map<int, std::vector<int>> &adjacency,
                        const std::unordered_map<int, Node *> &nodeMap,
                        const std::unordered_set<int> &used)
 {
@@ -73,9 +73,10 @@ std::vector<int> aStar(int start, int goal,
         }
 
         // Iterate neighbors from the adjacency list; if neighbor is used, skip it.
-        if (current >= 0 && current < static_cast<int>(adjacency.size()))
+        auto it = adjacency.find(current);
+        if (it != adjacency.end())
         {
-            for (int next : adjacency[current])
+            for (int next : it->second)
             {
                 if (used.find(next) != used.end())
                 {
@@ -177,6 +178,13 @@ int main(int argc, char *argv[])
     infile >> num_nodes;
     infile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
+    // Read all node lines into memory.
+    std::vector<std::string> nodeLines(num_nodes);
+    for (int i = 0; i < num_nodes; ++i)
+    {
+        std::getline(infile, nodeLines[i]);
+    }
+
     // Multi-threaded parsing.
     unsigned int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)
@@ -189,23 +197,9 @@ int main(int argc, char *argv[])
 
     auto worker = [&](int start, int end)
     {
-        std::ifstream threadFile(argv[1]);  // Open a separate file stream for each thread
-        threadFile.seekg(0, std::ios::beg); // Reset to the beginning of the file
-
-        // Skip the first line (num_nodes)
-        threadFile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-
-        // Skip lines until the thread's starting point
-        for (int i = 0; i < start; ++i)
-        {
-            threadFile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        }
-
         for (int i = start; i < end; ++i)
         {
-            std::string line;
-            std::getline(threadFile, line);
-            std::istringstream iss(line);
+            std::istringstream iss(nodeLines[i]);
             int id, length, begin_x, begin_y, end_x, end_y;
             std::string dummyType;
             // Read only required values; skip the rest.
@@ -218,12 +212,12 @@ int main(int argc, char *argv[])
     // Spawn a progress monitor thread.
     std::thread progressThread([&]()
                                {
-        while (processedNodes.load() < num_nodes)
-        {
+    while (processedNodes.load() < num_nodes)
+    {
         std::cout << "Parsing nodes: " << processedNodes.load() << " / " << num_nodes << "\r" << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-        std::cout << "Parsing nodes: " << num_nodes << " / " << num_nodes << std::endl; });
+    }
+    std::cout << "Parsing nodes: " << num_nodes << " / " << num_nodes << std::endl; });
 
     int chunk = num_nodes / num_threads;
     int remainder = num_nodes % num_threads;
@@ -241,77 +235,50 @@ int main(int argc, char *argv[])
 
     std::cout << "Parsed " << parsedNodes.size() << " nodes." << std::endl;
 
-    // Read remaining lines representing the adjacency list
+    // Read remaining lines representing the adjacency list into memory.
+    // Since the number of adjacency lines equals num_nodes, preallocate accordingly.
+    std::vector<std::string> adjLines(num_nodes);
+    for (int i = 0; i < num_nodes; ++i)
+    {
+        std::getline(infile, adjLines[i]);
+    }
+    size_t nAdj = adjLines.size();
+    std::cout << "Found " << nAdj << " adjacency lines." << std::endl;
+
     // Preallocate vector to hold parsed adjacency info.
-    std::vector<std::vector<int>> adjacency(num_nodes);
+    std::unordered_map<int, std::vector<int>> adjacency;
     std::vector<std::thread> adjThreads;
     std::atomic<size_t> processedAdj{0};
-
-    // Calculate the file offset where the adjacency block starts.
-    std::streampos adjOffset;
-    {
-        std::ifstream file(argv[1]);
-        if (!file.is_open())
-        {
-            std::cerr << "Error opening device file to compute adjacency offset." << std::endl;
-            return 1;
-        }
-        std::string dummy;
-        // Skip first line (num_nodes)
-        std::getline(file, dummy);
-        // Skip node definitions (num_nodes lines)
-        for (size_t i = 0; i < num_nodes; ++i)
-        {
-            std::getline(file, dummy);
-        }
-        // Record the offset; this is the start of the adjacency block.
-        adjOffset = file.tellg();
-        file.close();
-    }
+    std::mutex adjMapMutex; // Mutex for thread-safe access to adjacency map
 
     auto adjWorker = [&](size_t start, size_t end)
     {
-        std::ifstream adjFile(argv[1]);
-        if (!adjFile.is_open())
-        {
-            std::cerr << "Error reopening device file for adjacency parsing." << std::endl;
-            return;
-        }
-        // Seek directly to the start of the adjacency block.
-        adjFile.seekg(adjOffset);
-
-        // Skip lines until we reach the thread's starting point (relative to the adjacency block).
-        for (size_t i = 0; i < start; ++i)
-        {
-            adjFile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        }
-
-        // Now parse the assigned adjacency lines.
         for (size_t i = start; i < end; ++i)
         {
-            std::string line;
-            std::getline(adjFile, line);
-            std::istringstream iss(line);
+            std::istringstream iss(adjLines[i]);
             int parent;
-            iss >> parent; // parent is read but not used for indexing here if your adjacency vector order is fixed.
+            iss >> parent;
             std::vector<int> children;
             int child;
             while (iss >> child)
             {
                 children.push_back(child);
             }
-            adjacency[i] = children;
+            {
+                std::lock_guard<std::mutex> lock(adjMapMutex); // Protect shared adjacency map
+                adjacency[parent] = std::move(children);
+            }
             ++processedAdj;
         }
     };
 
-    // Split work for adjacency parsing.
+    // Set up multithreading for adjacency parsing.
     unsigned int num_adj_threads = std::thread::hardware_concurrency();
     if (num_adj_threads == 0)
         num_adj_threads = 8; // default if not detected
 
-    size_t chunk_adj = num_nodes / num_adj_threads;
-    size_t remainder_adj = num_nodes % num_adj_threads;
+    size_t chunk_adj = nAdj / num_adj_threads;
+    size_t remainder_adj = nAdj % num_adj_threads;
     size_t start_index = 0;
     for (unsigned int t = 0; t < num_adj_threads; ++t)
     {
@@ -323,12 +290,12 @@ int main(int argc, char *argv[])
     // Spawn a progress monitor thread for adjacency parsing.
     std::thread adjProgressThread([&]()
                                   {
-    while (processedAdj.load() < num_nodes)
+    while (processedAdj.load() < nAdj)
     {
-        std::cout << "Parsing adjacency: " << processedAdj.load() << " / " << num_nodes << "\r" << std::flush;
+        std::cout << "Parsing adjacency: " << processedAdj.load() << " / " << nAdj << "\r" << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    std::cout << "Parsing adjacency: " << num_nodes << " / " << num_nodes << std::endl; });
+    std::cout << "Parsing adjacency: " << nAdj << " / " << nAdj << std::endl; });
 
     for (auto &t : adjThreads)
         t.join();
