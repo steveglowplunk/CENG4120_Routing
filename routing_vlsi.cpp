@@ -12,23 +12,24 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
-#include "graph.cpp"
+#include "node.cpp"
 #include "net.cpp"
 #include <mutex>
 
 // Heuristic: Manhattan distance using Node begin coordinates.
 int heuristic(int nodeId, int goalId, const std::unordered_map<int, Node *> &nodeMap)
 {
-    int x1 = nodeMap.at(nodeId)->getBeginX();
-    int y1 = nodeMap.at(nodeId)->getBeginY();
-    int x2 = nodeMap.at(goalId)->getBeginX();
-    int y2 = nodeMap.at(goalId)->getBeginY();
+    int x1 = nodeMap.at(nodeId)->begin_x;
+    int y1 = nodeMap.at(nodeId)->begin_y;
+    int x2 = nodeMap.at(goalId)->begin_x;
+    int y2 = nodeMap.at(goalId)->begin_y;
     return abs(x1 - x2) + abs(y1 - y2);
 }
 
 // A* search from start to goal on the given graph.
 // 'used' contains nodes that are already occupied by previous nets.
-std::vector<int> aStar(int start, int goal, const Graph &graph,
+std::vector<int> aStar(int start, int goal,
+                       const std::vector<std::vector<int>> &adjacency,
                        const std::unordered_map<int, Node *> &nodeMap,
                        const std::unordered_set<int> &used)
 {
@@ -72,9 +73,9 @@ std::vector<int> aStar(int start, int goal, const Graph &graph,
         }
 
         // Iterate neighbors from the adjacency list; if neighbor is used, skip it.
-        if (graph.adjacency.find(current) != graph.adjacency.end())
+        if (current >= 0 && current < static_cast<int>(adjacency.size()))
         {
-            for (int next : graph.adjacency.at(current))
+            for (int next : adjacency[current])
             {
                 if (used.find(next) != used.end())
                 {
@@ -172,25 +173,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int num_nodes;
+    size_t num_nodes;
     infile >> num_nodes;
     infile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-
-    Graph graph;
-    // Preallocate vector capacity.
-    graph.nodes.reserve(num_nodes);
-
-    // Read all node lines into memory.
-    std::vector<std::string> nodeLines(num_nodes);
-    for (int i = 0; i < num_nodes; ++i)
-    {
-        std::getline(infile, nodeLines[i]);
-    }
 
     // Multi-threaded parsing.
     unsigned int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)
-        num_threads = 4;                      // default if not detected
+        num_threads = 8;                      // default if not detected
     std::vector<Node> parsedNodes(num_nodes); // Preallocate vector for parsed nodes.
     std::vector<std::thread> threads;
 
@@ -199,9 +189,23 @@ int main(int argc, char *argv[])
 
     auto worker = [&](int start, int end)
     {
+        std::ifstream threadFile(argv[1]);  // Open a separate file stream for each thread
+        threadFile.seekg(0, std::ios::beg); // Reset to the beginning of the file
+
+        // Skip the first line (num_nodes)
+        threadFile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+        // Skip lines until the thread's starting point
+        for (int i = 0; i < start; ++i)
+        {
+            threadFile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        }
+
         for (int i = start; i < end; ++i)
         {
-            std::istringstream iss(nodeLines[i]);
+            std::string line;
+            std::getline(threadFile, line);
+            std::istringstream iss(line);
             int id, length, begin_x, begin_y, end_x, end_y;
             std::string dummyType;
             // Read only required values; skip the rest.
@@ -214,12 +218,12 @@ int main(int argc, char *argv[])
     // Spawn a progress monitor thread.
     std::thread progressThread([&]()
                                {
-    while (processedNodes.load() < num_nodes)
-    {
+        while (processedNodes.load() < num_nodes)
+        {
         std::cout << "Parsing nodes: " << processedNodes.load() << " / " << num_nodes << "\r" << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-    std::cout << "Parsing nodes: " << num_nodes << " / " << num_nodes << std::endl; });
+        }
+        std::cout << "Parsing nodes: " << num_nodes << " / " << num_nodes << std::endl; });
 
     int chunk = num_nodes / num_threads;
     int remainder = num_nodes % num_threads;
@@ -235,51 +239,79 @@ int main(int argc, char *argv[])
         t.join();
     progressThread.join();
 
-    // Move the parsed nodes into the graph.
-    graph.nodes = std::move(parsedNodes);
+    std::cout << "Parsed " << parsedNodes.size() << " nodes." << std::endl;
 
-    std::cout << "Parsed " << graph.nodes.size() << " nodes." << std::endl;
-
-    // Read remaining lines representing the adjacency list into memory.
-    // Since the number of adjacency lines equals num_nodes, preallocate accordingly.
-    std::vector<std::string> adjLines(num_nodes);
-    for (int i = 0; i < num_nodes; ++i)
-    {
-        std::getline(infile, adjLines[i]);
-    }
-    size_t nAdj = adjLines.size();
-    std::cout << "Found " << nAdj << " adjacency lines." << std::endl;
-
+    // Read remaining lines representing the adjacency list
     // Preallocate vector to hold parsed adjacency info.
-    std::vector<std::pair<int, std::vector<int>>> parsedAdj(nAdj);
+    std::vector<std::vector<int>> adjacency(num_nodes);
     std::vector<std::thread> adjThreads;
     std::atomic<size_t> processedAdj{0};
 
+    // Calculate the file offset where the adjacency block starts.
+    std::streampos adjOffset;
+    {
+        std::ifstream file(argv[1]);
+        if (!file.is_open())
+        {
+            std::cerr << "Error opening device file to compute adjacency offset." << std::endl;
+            return 1;
+        }
+        std::string dummy;
+        // Skip first line (num_nodes)
+        std::getline(file, dummy);
+        // Skip node definitions (num_nodes lines)
+        for (size_t i = 0; i < num_nodes; ++i)
+        {
+            std::getline(file, dummy);
+        }
+        // Record the offset; this is the start of the adjacency block.
+        adjOffset = file.tellg();
+        file.close();
+    }
+
     auto adjWorker = [&](size_t start, size_t end)
     {
+        std::ifstream adjFile(argv[1]);
+        if (!adjFile.is_open())
+        {
+            std::cerr << "Error reopening device file for adjacency parsing." << std::endl;
+            return;
+        }
+        // Seek directly to the start of the adjacency block.
+        adjFile.seekg(adjOffset);
+
+        // Skip lines until we reach the thread's starting point (relative to the adjacency block).
+        for (size_t i = 0; i < start; ++i)
+        {
+            adjFile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        }
+
+        // Now parse the assigned adjacency lines.
         for (size_t i = start; i < end; ++i)
         {
-            std::istringstream iss(adjLines[i]);
+            std::string line;
+            std::getline(adjFile, line);
+            std::istringstream iss(line);
             int parent;
-            iss >> parent;
+            iss >> parent; // parent is read but not used for indexing here if your adjacency vector order is fixed.
             std::vector<int> children;
             int child;
             while (iss >> child)
             {
                 children.push_back(child);
             }
-            parsedAdj[i] = {parent, children};
+            adjacency[i] = children;
             ++processedAdj;
         }
     };
 
-    // Set up multithreading for adjacency parsing.
+    // Split work for adjacency parsing.
     unsigned int num_adj_threads = std::thread::hardware_concurrency();
     if (num_adj_threads == 0)
-        num_adj_threads = 4; // default if not detected
+        num_adj_threads = 8; // default if not detected
 
-    size_t chunk_adj = nAdj / num_adj_threads;
-    size_t remainder_adj = nAdj % num_adj_threads;
+    size_t chunk_adj = num_nodes / num_adj_threads;
+    size_t remainder_adj = num_nodes % num_adj_threads;
     size_t start_index = 0;
     for (unsigned int t = 0; t < num_adj_threads; ++t)
     {
@@ -291,63 +323,16 @@ int main(int argc, char *argv[])
     // Spawn a progress monitor thread for adjacency parsing.
     std::thread adjProgressThread([&]()
                                   {
-    while (processedAdj.load() < nAdj)
+    while (processedAdj.load() < num_nodes)
     {
-        std::cout << "Parsing adjacency: " << processedAdj.load() << " / " << nAdj << "\r" << std::flush;
+        std::cout << "Parsing adjacency: " << processedAdj.load() << " / " << num_nodes << "\r" << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    std::cout << "Parsing adjacency: " << nAdj << " / " << nAdj << std::endl; });
+    std::cout << "Parsing adjacency: " << num_nodes << " / " << num_nodes << std::endl; });
 
     for (auto &t : adjThreads)
         t.join();
     adjProgressThread.join();
-
-    // Multi-threaded merging of parsed adjacency info into the graph.
-    std::mutex mergeMutex;
-    unsigned int num_merge_threads = std::thread::hardware_concurrency();
-    if (num_merge_threads == 0)
-        num_merge_threads = 4; // default if not detected
-
-    size_t nMerge = parsedAdj.size();
-    size_t mergeChunk = nMerge / num_merge_threads;
-    size_t mergeRemainder = nMerge % num_merge_threads;
-    size_t mergeStart = 0;
-    std::vector<std::thread> mergeThreads;
-    std::atomic<size_t> mergedCount{0};
-
-    auto mergeWorker = [&](size_t start, size_t end)
-    {
-        for (size_t i = start; i < end; ++i)
-        {
-            const auto &entry = parsedAdj[i];
-            { // Lock while updating graph.adjacency.
-                std::lock_guard<std::mutex> lock(mergeMutex);
-                graph.addEdges(entry.first, entry.second);
-            }
-            ++mergedCount;
-        }
-    };
-
-    // Optionally, spawn a progress monitor thread for merging.
-    std::thread mergeProgressThread([&]()
-                                    {
-    while (mergedCount.load() < nMerge)
-    {
-        std::cout << "Merging edges: " << mergedCount.load() << " / " << nMerge << "\r" << std::flush;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-    std::cout << "Merging edges: " << nMerge << " / " << nMerge << std::endl; });
-
-    for (unsigned int t = 0; t < num_merge_threads; ++t)
-    {
-        size_t mergeEnd = mergeStart + mergeChunk + (t < mergeRemainder ? 1 : 0);
-        mergeThreads.emplace_back(mergeWorker, mergeStart, mergeEnd);
-        mergeStart = mergeEnd;
-    }
-
-    for (auto &t : mergeThreads)
-        t.join();
-    mergeProgressThread.join();
 
     // Load netlist file.
     std::vector<Net> nets = parseNetlist(argv[2]);
@@ -355,9 +340,9 @@ int main(int argc, char *argv[])
 
     // Create a mapping from node ID to Node* for use in A* (assumes IDs are unique)
     std::unordered_map<int, Node *> nodeMap;
-    for (auto &node : graph.nodes)
+    for (auto &node : parsedNodes)
     {
-        nodeMap[node.getId()] = &node;
+        nodeMap[node.id] = &node;
     }
 
     // Global used nodes to prevent routing congestion.
@@ -375,7 +360,7 @@ int main(int argc, char *argv[])
             std::cout << "[Routing] Starting route for net " << net.id << " (" << net.name
                       << ") from " << net.source << " to " << sink << std::endl;
             // Run A* search; the usedNodes set restricts the search to unoccupied nodes.
-            std::vector<int> path = aStar(net.source, sink, graph, nodeMap, usedNodes);
+            std::vector<int> path = aStar(net.source, sink, adjacency, nodeMap, usedNodes);
             if (path.empty())
             {
                 std::cerr << "[Routing ERROR] Failed to find path for net " << net.id

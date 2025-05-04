@@ -2,15 +2,13 @@
 #include <string>
 #include <vector>
 
-class Net
+struct Net
 {
-public:
     int id;
     std::string name;
     int source;
     std::vector<int> sinks;
-    // Holds pairs representing the routed edges (parent, child)
-    std::vector<std::pair<int, int>> route;
+    std::vector<std::pair<int, int>> route; // Holds pairs representing the routed edges (parent, child)
 
     Net(int id, const std::string &name, int source)
         : id(id), name(name), source(source) {}
