@@ -3,7 +3,8 @@
 #include <vector>
 #include "node.cpp"
 
-class Graph {
+class Graph
+{
 public:
     // std::vector<Node> nodes; // Removed
     std::unordered_map<int, std::vector<int>> adjacency;
@@ -12,7 +13,8 @@ public:
     //     nodes.push_back(node);
     // }
 
-    void addEdges(int parent, const std::vector<int>& children) {
+    void addEdges(int parent, const std::vector<int> &children)
+    {
         adjacency[parent] = children;
     }
 };
